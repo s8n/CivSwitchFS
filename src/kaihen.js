@@ -552,13 +552,19 @@ export async function run() {
     } finally {
         // Retire the IStorage cache alias so stale heap pointers don't
         // persist in the BC save.  Every writeFs call during the chain
-        // wrote heap-targeted bytes into the save via write-through;
-        // intermediate commits (donor, cleanupDonor) flushed them.
-        // Writing retirement bytes at offset 0 neutralises the cache
-        // entry, and a final commit ensures the save carries those
-        // neutral bytes instead of the stale ones.
+        // wrote heap-targeted bytes into the dirty buffer via
+        // write-through; intermediate commits (donor, cleanupDonor)
+        // flushed them to NAND.
+        //
+        // A plain ipcStorageWrite at offset 0 goes through the alias
+        // and lands in the heap, not the save. Invalidating the I/O
+        // cache first drops the dirty buffer entries so the subsequent
+        // write bypasses the alias and reaches the backing store.
         try {
             if (context.candidateHandle) {
+                runtime.ipcStorageInvalidate(
+                    context.candidateHandle, 0, 0x8000);
+
                 const retireBuf = runtime.allocPage(0x1000);
                 for (let i = 0; i < 16; i++)
                     runtime.write8(retireBuf + BigInt(i), 0x42n);
@@ -571,8 +577,9 @@ export async function run() {
                     const commitReply = cmifSend(saveMount.handle,
                         {pkt, cmd: 10, input: [], rawWords: 8});
                     closeHandle(saveMount.handle);
-                    await khLog("RETIRE: cache alias neutralised " +
-                        "tx=" + hex(commitReply.transport || 0) +
+                    await khLog("RETIRE: cache invalidated + " +
+                        "alias neutralised tx=" +
+                        hex(commitReply.transport || 0) +
                         " rc=" + hex(commitReply.result || 0));
                 }
             }
