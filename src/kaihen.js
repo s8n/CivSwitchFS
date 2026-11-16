@@ -550,6 +550,39 @@ export async function run() {
         await khLog("completed stages: " + stages.join(" > "));
         throw error;
     } finally {
+        // Retire the IStorage cache alias so stale heap pointers don't
+        // persist in the BC save.  Every writeFs call during the chain
+        // wrote heap-targeted bytes into the save via write-through;
+        // intermediate commits (donor, cleanupDonor) flushed them.
+        // Writing retirement bytes at offset 0 neutralises the cache
+        // entry, and a final commit ensures the save carries those
+        // neutral bytes instead of the stale ones.
+        try {
+            if (context.candidateHandle) {
+                const retireBuf = runtime.allocPage(0x1000);
+                for (let i = 0; i < 16; i++)
+                    runtime.write8(retireBuf + BigInt(i), 0x42n);
+                runtime.ipcStorageWrite(
+                    context.candidateHandle, 0n, retireBuf, 16);
+
+                const saveMount = runtime.openMount("save");
+                if (saveMount && saveMount.handle) {
+                    const pkt = runtime.allocPage(0x2000);
+                    const commitReply = cmifSend(saveMount.handle,
+                        {pkt, cmd: 10, input: [], rawWords: 8});
+                    closeHandle(saveMount.handle);
+                    await khLog("RETIRE: cache alias neutralised " +
+                        "tx=" + hex(commitReply.transport || 0) +
+                        " rc=" + hex(commitReply.result || 0));
+                }
+            }
+        } catch (retireError) {
+            try {
+                await khLog("RETIRE: best-effort failed: " +
+                    String(retireError?.message || retireError));
+            } catch (_) { /* silent */ }
+        }
+        
         if (!context.henStartup) {
             // Failed run: release every tracked handle (reverse order) so the
             // boot stays reusable — leaked sm/pm sessions otherwise exhaust
