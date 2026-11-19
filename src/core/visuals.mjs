@@ -1,6 +1,7 @@
 // Keep payload logs inside an in-page overlay with a consistent row layout.
 const LOGGER_KEY = "__CIVSWITCHFS_VISUAL_LOGGER_V2__";
 const LOGGER_STATE_KEY = "__CIVSWITCHFS_VISUAL_LOG_STATE_V2__";
+const STATUS_OBSERVER_KEY = "__CIVSWITCHFS_STATUS_OBSERVER_V1__";
 const INPUT_CONTROL_STATE_KEY = "__CIVSWITCHFS_INPUT_CONTROL_STATE_V1__";
 const INPUT_CONTROL_VERSION = 4;
 const LOG_LABEL = "CivSwitchFS logs";
@@ -18,6 +19,19 @@ export function installEarlyVisualLogPatch() {
     installVisualLogPatchFor(api);
 }
 
+/** Feed the status screen from the existing logger without changing log timing. */
+export function setStatusObserver(observer) {
+    const previous = globalThis[STATUS_OBSERVER_KEY];
+    if (typeof observer === "function") globalThis[STATUS_OBSERVER_KEY] = observer;
+    else delete globalThis[STATUS_OBSERVER_KEY];
+    const output = globalThis[LOGGER_STATE_KEY]?.output;
+    if (output?.style && observer) output.style.display = "none";
+    return () => {
+        if (previous === undefined) delete globalThis[STATUS_OBSERVER_KEY];
+        else globalThis[STATUS_OBSERVER_KEY] = previous;
+    };
+}
+
 function installVisualLogPatchFor(api) {
     const document = globalThis.document;
     if (!api || typeof api.log !== "function" || !document?.body) return;
@@ -28,6 +42,8 @@ function installVisualLogPatchFor(api) {
         if (existingOutput?.style) {
             existingOutput.style.overflowY = "auto";
             existingOutput.scrollTop = existingOutput.scrollHeight;
+            if (globalThis[STATUS_OBSERVER_KEY])
+                existingOutput.style.display = "none";
         }
         api.log = existingLogger;
         globalThis.log = existingLogger;
@@ -72,6 +88,8 @@ function installVisualLogPatchFor(api) {
             state.compact = applyConsoleStyle(state.output, document);
             document.body.appendChild(state.output);
         }
+        if (globalThis[STATUS_OBSERVER_KEY])
+            state.output.style.display = "none";
         return state.output;
     }
 
@@ -81,6 +99,15 @@ function installVisualLogPatchFor(api) {
         const message = String(callArgs[0]);
         const timestamp = formatTimestamp(new Date());
         forwardPersistedLog(callArgs);
+
+        const observer = globalThis[STATUS_OBSERVER_KEY];
+        if (typeof observer === "function") {
+            try { observer(message); }
+            catch (error) {
+                globalThis.__CIVSWITCHFS_STATUS_ERROR__ =
+                    String(error?.message || error);
+            }
+        }
 
         let initialLogResult = null;
         if (originalLog) {

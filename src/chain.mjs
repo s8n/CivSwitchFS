@@ -15,25 +15,54 @@ import coreRuntime from "./core/runtime.mjs";
 import {run as runPromotion} from "./core.js";
 import {run as runKaihen} from "./kaihen.js";
 import {SD_MANIFEST} from "./kaihen/state.mjs";
+import {createChainStatus} from "./core/status-chain.mjs";
 
 const {log} = coreRuntime;
 
 export async function run() {
-    await runPromotion();
+    const status = createChainStatus();
+    await status.waitForStart();
+    let runNumber = 0;
+    // A fresh FS run is possible only after the UI verifies an eligible retry.
+    while (true) {
+        status.beginRun(++runNumber);
+        status.phase("fs");
+        let failed = false;
+        let failure;
+        try {
+            await runPromotion();
 
-    // Gate on the retained-boot snapshot the chain re-derives from. A
-    // promotion lottery loss ends here, cleanly: restart the game and the
-    // whole sequence runs again.
-    const state = globalThis.fsKaihen;
-    if (!state || !state.domainSession) {
-        await log("CHAIN: promotion did not retain a session — " +
-            "kaiHEN not started; restart the game to retry");
-        return;
+            // Never enter HEN without the session retained by this FS run.
+            const state = globalThis.fsKaihen;
+            if (!state || !state.domainSession) {
+                await log("CHAIN: promotion did not retain a session — " +
+                    "kaiHEN not started; restart the game to retry");
+            } else {
+                status.phase("files");
+                await log("CHAIN: promotion retained a session — starting kaiHEN");
+                globalThis.__KH_MODE = "run";
+                globalThis.__KH_SKIP = ["dx", "probes"];
+                globalThis.__KH_MANIFEST = SD_MANIFEST;
+                await runKaihen();
+            }
+        } catch (error) {
+            failed = true;
+            failure = error;
+            status.recordError(error);
+        } finally {
+            status.finish();
+        }
+
+        if (failed) {
+            // Keep the native input reader alive with the terminal screen.
+            await status.holdTerminal();
+            throw failure;
+        }
+
+        // The next iteration requires a deliberate X release after a clean FS exit.
+        if (!await status.waitForRetry()) {
+            await status.holdTerminal();
+            return;
+        }
     }
-
-    await log("CHAIN: promotion retained a session — starting kaiHEN");
-    globalThis.__KH_MODE = "run";
-    globalThis.__KH_SKIP = ["dx", "probes"];
-    globalThis.__KH_MANIFEST = SD_MANIFEST;
-    await runKaihen();
 }
